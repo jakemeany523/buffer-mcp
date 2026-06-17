@@ -62,7 +62,7 @@ Add to your MCP config (`~/Library/Application Support/Claude/claude_desktop_con
 | `buffer_get_account` | Get account info and find your org ID |
 | `buffer_create_post` | Schedule a single post (with images, videos, threads, LinkedIn metadata) |
 | `buffer_batch_create_posts` | Schedule up to 25 posts in one call |
-| `buffer_update_post` | Edit a scheduled post (atomic delete + recreate) |
+| `buffer_update_post` | Edit a scheduled post (delete + recreate; preserves images, videos, threads, and LinkedIn metadata; verifies the canonical ID before deleting) |
 | `buffer_delete_post` | Remove a post from the queue |
 | `buffer_find_post_by_schedule` | Look up the canonical ID for a post by its scheduled time |
 | `buffer_list_posts` | List scheduled posts in your queue |
@@ -97,6 +97,8 @@ To post a thread, use `thread_replies` in `buffer_create_post`. Twitter suppress
 
 ### Post ID rotation (known Buffer bug)
 `createPost` can return a transient ID that differs from the ID returned by `buffer_list_posts` for the same post. Always use `buffer_find_post_by_schedule` to get the canonical (deletable) ID before calling `buffer_delete_post` or `buffer_update_post`.
+
+`buffer_delete_post` and `buffer_update_post` can also resolve the canonical ID for you: pass `expected_scheduled_at` (and `verify_text_prefix` to disambiguate) and the tool re-lists by schedule before mutating. This matters most for `buffer_update_post`, which is a delete-then-recreate — a stale `post_id` there means the delete no-ops and you end up with a duplicate, so verification aborts the update instead of stranding an orphan.
 
 ### Org ID vs Account ID
 Buffer exposes both `account.id` (account-level) and `account.organizations[].id` (org-level). Using the account ID as the org ID causes silent `"Organization not found"` errors. Run `buffer_get_account` and copy the org ID from the organizations list.
