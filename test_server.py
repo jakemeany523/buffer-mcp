@@ -35,7 +35,6 @@ import server  # noqa: E402
 from server import (  # noqa: E402
     _canonical_post_id,
     _due_ats_match,
-    _find_post_by_schedule,
     _is_pagination_schema_error,
     _list_posts_paginated,
     _parse_iso,
