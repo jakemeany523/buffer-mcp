@@ -26,9 +26,7 @@ import asyncio
 import json
 import os
 import re
-import sys
 from typing import Optional, List, Dict, Any
-from enum import Enum
 from datetime import datetime
 
 import httpx
@@ -1585,10 +1583,10 @@ async def buffer_health_check() -> str:
         lines = [
             "# Buffer Health Check: PASS",
             "",
-            f"- **Token**: Valid",
+            "- **Token**: Valid",
             f"- **Account**: {account.get('name', 'N/A')} (`{account.get('id', 'N/A')}`)",
             f"- **Channels**: {len(channels)} connected",
-            f"- **API**: api.buffer.com responding normally",
+            "- **API**: api.buffer.com responding normally",
         ]
 
         for ch in channels:
@@ -1868,10 +1866,14 @@ async def buffer_get_reply_links(input: ReplyLinksInput) -> str:
             lines.append(f"   Posted: {created}")
         if metrics:
             parts = []
-            if metrics.get("like_count", 0): parts.append(f"{metrics['like_count']} likes")
-            if metrics.get("retweet_count", 0): parts.append(f"{metrics['retweet_count']} RTs")
-            if metrics.get("reply_count", 0): parts.append(f"{metrics['reply_count']} replies")
-            if metrics.get("impression_count", 0): parts.append(f"{metrics['impression_count']} views")
+            if metrics.get("like_count", 0):
+                parts.append(f"{metrics['like_count']} likes")
+            if metrics.get("retweet_count", 0):
+                parts.append(f"{metrics['retweet_count']} RTs")
+            if metrics.get("reply_count", 0):
+                parts.append(f"{metrics['reply_count']} replies")
+            if metrics.get("impression_count", 0):
+                parts.append(f"{metrics['impression_count']} views")
             if parts:
                 lines.append(f"   Engagement: {', '.join(parts)}")
 
@@ -2156,5 +2158,10 @@ async def buffer_get_engagement(params: GetEngagementInput) -> str:
 
 # ---- Entry Point -------------------------------------------------------------
 
-if __name__ == "__main__":
+def main() -> None:
+    """Console-script entry point (see [project.scripts] in pyproject.toml)."""
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()
