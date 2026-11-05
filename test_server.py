@@ -35,10 +35,11 @@ import server  # noqa: E402
 from server import (  # noqa: E402
     _canonical_post_id,
     _due_ats_match,
-    _find_post_by_schedule,
     _is_pagination_schema_error,
     _list_posts_paginated,
+    _load_known_channels,
     _parse_iso,
+    _resolve_channel_id,
     buffer_create_post,
     buffer_delete_post,
     buffer_list_posts,
@@ -376,6 +377,40 @@ class TestFindPostByScheduleTool(unittest.TestCase):
             )))
 
         self.assertIn("No scheduled post found", got)
+
+
+class TestChannelResolution(unittest.TestCase):
+    """Generalized BUFFER_CHANNEL_* shorthand loading and resolution."""
+
+    def test_load_known_channels_picks_up_any_platform(self):
+        env = {
+            "BUFFER_CHANNEL_TWITTER": "tw-123",
+            "BUFFER_CHANNEL_MASTODON": "md-456",
+            "BUFFER_CHANNEL_BLUESKY": "  bs-789  ",  # trimmed
+            "BUFFER_ACCESS_TOKEN": "should-be-ignored",
+            "UNRELATED": "nope",
+        }
+        channels = _load_known_channels(env)
+        self.assertEqual(channels["twitter"], "tw-123")
+        self.assertEqual(channels["mastodon"], "md-456")
+        self.assertEqual(channels["bluesky"], "bs-789")
+        self.assertNotIn("access_token", channels)
+        self.assertNotIn("unrelated", channels)
+
+    def test_load_known_channels_ignores_empty_values(self):
+        env = {"BUFFER_CHANNEL_TWITTER": "tw-1", "BUFFER_CHANNEL_LINKEDIN": "   "}
+        channels = _load_known_channels(env)
+        self.assertIn("twitter", channels)
+        self.assertNotIn("linkedin", channels)
+
+    def test_resolve_channel_id_uses_shorthand(self):
+        with patch.object(server, "KNOWN_CHANNELS", {"mastodon": "md-456"}):
+            self.assertEqual(_resolve_channel_id("mastodon"), "md-456")
+            self.assertEqual(_resolve_channel_id("MASTODON"), "md-456")
+
+    def test_resolve_channel_id_passes_through_raw_id(self):
+        with patch.object(server, "KNOWN_CHANNELS", {"twitter": "tw-1"}):
+            self.assertEqual(_resolve_channel_id("raw-channel-id-xyz"), "raw-channel-id-xyz")
 
 
 if __name__ == "__main__":
