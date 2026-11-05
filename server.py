@@ -48,13 +48,42 @@ ORG_ID = os.environ.get("BUFFER_ORG_ID", "")
 
 # Optional channel shorthands — set these to use "twitter" / "linkedin"
 # as shorthand instead of raw channel IDs in tool calls.
-KNOWN_CHANNELS: Dict[str, str] = {}
-_ch_twitter = os.environ.get("BUFFER_CHANNEL_TWITTER", "")
-_ch_linkedin = os.environ.get("BUFFER_CHANNEL_LINKEDIN", "")
-if _ch_twitter:
-    KNOWN_CHANNELS["twitter"] = _ch_twitter
-if _ch_linkedin:
-    KNOWN_CHANNELS["linkedin"] = _ch_linkedin
+#
+# Any environment variable named BUFFER_CHANNEL_<PLATFORM> is picked up
+# automatically — e.g. BUFFER_CHANNEL_MASTODON enables the "mastodon"
+# shorthand — so new platforms work without a code change.
+SUPPORTED_PLATFORMS = (
+    "twitter",
+    "linkedin",
+    "facebook",
+    "instagram",
+    "threads",
+    "mastodon",
+    "bluesky",
+    "pinterest",
+    "tiktok",
+    "youtube",
+    "google_business",
+)
+
+
+def _load_known_channels(environ: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Build the shorthand -> channel-ID map from BUFFER_CHANNEL_* env vars.
+
+    Each ``BUFFER_CHANNEL_<NAME>`` variable becomes the shorthand ``<name>``
+    (lowercased), so callers can pass ``"twitter"`` / ``"mastodon"`` / etc.
+    instead of a raw channel ID. Empty values are ignored.
+    """
+    env = os.environ if environ is None else environ
+    prefix = "BUFFER_CHANNEL_"
+    channels: Dict[str, str] = {}
+    for key, value in env.items():
+        if key.startswith(prefix) and value and value.strip():
+            channels[key[len(prefix):].lower()] = value.strip()
+    return channels
+
+
+KNOWN_CHANNELS: Dict[str, str] = _load_known_channels()
 
 
 # ---- Shared Utilities -------------------------------------------------------
@@ -202,7 +231,11 @@ def _format_post_summary(post: dict) -> str:
 def _resolve_channel_id(channel: str) -> str:
     """
     Resolve a channel identifier to a Buffer channel ID.
-    Accepts raw IDs or shorthand names ('twitter', 'linkedin').
+
+    Accepts a raw Buffer channel ID, or a shorthand name configured via a
+    ``BUFFER_CHANNEL_<PLATFORM>`` env var (e.g. 'twitter', 'linkedin',
+    'mastodon', 'bluesky'). Unknown values are returned unchanged so raw
+    IDs still work.
     """
     lower = channel.lower().strip()
     if lower in KNOWN_CHANNELS:
@@ -723,6 +756,13 @@ async def buffer_list_channels() -> str:
 
         lines.append("")
         lines.append(f"**Total**: {len(channels)} channels")
+
+        if KNOWN_CHANNELS:
+            lines.append("")
+            lines.append("**Configured shorthands** (usable in place of raw IDs):")
+            for shorthand, ch_id in sorted(KNOWN_CHANNELS.items()):
+                lines.append(f"- `{shorthand}` -> `{ch_id}`")
+
         return "\n".join(lines)
 
     except Exception as e:

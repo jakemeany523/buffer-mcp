@@ -82,8 +82,7 @@ Add to your MCP config (`~/Library/Application Support/Claude/claude_desktop_con
 |----------|----------|-------------|
 | `BUFFER_ACCESS_TOKEN` | Yes | Your Buffer API access token |
 | `BUFFER_ORG_ID` | Yes | Your Buffer organization ID (from `buffer_get_account`) |
-| `BUFFER_CHANNEL_TWITTER` | No | Twitter channel ID — enables `"twitter"` shorthand |
-| `BUFFER_CHANNEL_LINKEDIN` | No | LinkedIn channel ID — enables `"linkedin"` shorthand |
+| `BUFFER_CHANNEL_<PLATFORM>` | No | Channel ID for any platform — enables the `"<platform>"` shorthand. E.g. `BUFFER_CHANNEL_TWITTER` → `"twitter"`, `BUFFER_CHANNEL_MASTODON` → `"mastodon"`. Recognized: twitter, linkedin, facebook, instagram, threads, mastodon, bluesky, pinterest, tiktok, youtube, google_business (any name works) |
 | `BUFFER_TWITTER_USERNAME` | No | Your Twitter username for `buffer_get_reply_links` |
 | `TWITTER_BEARER_TOKEN` | No | Twitter API v2 bearer token (for reply links + engagement) |
 | `CLOUDFLARE_ACCOUNT_ID` | No | Cloudflare account ID (for `buffer_upload_image`) |

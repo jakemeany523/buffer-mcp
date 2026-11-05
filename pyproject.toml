@@ -6,8 +6,11 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Jake Meany" }]
+# NOTE: mcp is capped below 2.0 — the server uses the v1 `mcp.server.fastmcp`
+# API, which mcp 2.x removed (renamed to MCPServer). Bump deliberately with a
+# code migration, not implicitly.
 dependencies = [
-    "mcp[cli]>=1.0.0",
+    "mcp[cli]>=1.0.0,<2",
     "httpx>=0.27.0",
     "pydantic>=2.0.0",
 ]
@@ -15,7 +18,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
-    "ruff>=0.6.0",
+    "ruff>=0.6.0,<1.0",
 ]
 
 [project.urls]
@@ -40,3 +43,10 @@ python_files = ["test_*.py"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+# Pin the rule set explicitly so lint results don't drift when ruff changes
+# its defaults between releases. This is the classic flake8-equivalent core
+# (pycodestyle errors + pyflakes + warnings), which catches real defects
+# without enforcing stylistic rewrites on the existing codebase.
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "W"]

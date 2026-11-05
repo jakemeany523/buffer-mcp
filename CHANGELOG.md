@@ -7,7 +7,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Multi-platform channel shorthands: any `BUFFER_CHANNEL_<PLATFORM>` env var now
+  registers a shorthand automatically (e.g. `BUFFER_CHANNEL_MASTODON` → `mastodon`),
+  covering Facebook, Instagram, Threads, Mastodon, Bluesky, Pinterest, TikTok,
+  YouTube, and Google Business alongside the original Twitter/LinkedIn.
+  `buffer_list_channels` now also reports the configured shorthands.
 - GitHub Actions CI: runs the test suite and `ruff` lint on Python 3.10–3.12.
+
+### Changed
+- Made the build reproducible: capped `mcp[cli]` to `<2` (the server uses the
+  v1 `mcp.server.fastmcp` API that mcp 2.x removed) and `ruff` to `<1.0`, and
+  pinned the ruff rule set explicitly (`E4/E7/E9/F/W`) so lint no longer drifts
+  when ruff changes its defaults.
 - `LICENSE` file (MIT) to match the declared license.
 - `dev` optional-dependency group (`pytest`, `ruff`) and pytest/ruff config.
 - `main()` console-script entry point and a hatch wheel target for `server.py`.
