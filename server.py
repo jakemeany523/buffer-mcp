@@ -29,7 +29,7 @@ import re
 import sys
 from typing import Optional, List, Dict, Any
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, timezone
 
 import httpx
 from pydantic import BaseModel, Field, field_validator, ConfigDict
@@ -210,6 +210,80 @@ def _resolve_channel_id(channel: str) -> str:
     if lower in KNOWN_CHANNELS:
         return KNOWN_CHANNELS[lower]
     return channel
+
+
+def _build_post_input(
+    channel_id: str,
+    text: str,
+    mode: str,
+    *,
+    scheduled_at: Optional[str] = None,
+    image_urls: Optional[List[str]] = None,
+    video_urls: Optional[List[str]] = None,
+    video_thumbnails: Optional[List[str]] = None,
+    linkedin_title: Optional[str] = None,
+    linkedin_description: Optional[str] = None,
+    linkedin_thumbnail_url: Optional[str] = None,
+    thread_replies: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """
+    Build the Buffer GraphQL `CreatePostInput` object shared by create, batch,
+    and update flows.
+
+    Consolidating this here ensures every mutation path attaches assets and
+    metadata identically. Previously each tool reimplemented this, and
+    buffer_update_post's copy silently dropped videos, Twitter threads, and
+    LinkedIn metadata on edit.
+
+    Buffer AssetInput schema (2026-05-26): `assets` is a LIST of objects, each
+    with exactly ONE of {"image": {...}} or {"video": {...}}. The old plural
+    assets["images"]/assets["videos"] shape is dead.
+    """
+    post_input: Dict[str, Any] = {
+        "channelId": channel_id,
+        "text": text,
+        "mode": mode,
+        "schedulingType": "automatic",
+    }
+    if scheduled_at:
+        post_input["dueAt"] = scheduled_at
+
+    assets_list: List[Dict[str, Any]] = []
+    if image_urls:
+        for url in image_urls:
+            assets_list.append({"image": {"url": url}})
+    if video_urls:
+        thumbs = video_thumbnails or []
+        for i, url in enumerate(video_urls):
+            entry: Dict[str, Any] = {"url": url}
+            if i < len(thumbs) and thumbs[i]:
+                entry["thumbnailUrl"] = thumbs[i]
+            assets_list.append({"video": entry})
+    if assets_list:
+        post_input["assets"] = assets_list
+
+    linkedin_meta: Dict[str, Any] = {}
+    if linkedin_title:
+        linkedin_meta["title"] = linkedin_title
+    if linkedin_description:
+        linkedin_meta["description"] = linkedin_description
+    if linkedin_thumbnail_url:
+        linkedin_meta["thumbnailUrl"] = linkedin_thumbnail_url
+
+    twitter_meta: Dict[str, Any] = {}
+    if thread_replies:
+        # ThreadedPostInput.assets is NON_NULL — pass [] when a reply has no media.
+        twitter_meta["thread"] = [{"text": t, "assets": []} for t in thread_replies]
+
+    metadata_obj: Dict[str, Any] = {}
+    if linkedin_meta:
+        metadata_obj["linkedin"] = linkedin_meta
+    if twitter_meta:
+        metadata_obj["twitter"] = twitter_meta
+    if metadata_obj:
+        post_input["metadata"] = metadata_obj
+
+    return post_input
 
 
 # ---- ID + Schedule Helpers (canonical-id + pagination fixes) ----------------
@@ -777,60 +851,21 @@ async def buffer_create_post(params: CreatePostInput) -> str:
         else:
             mode = "addToQueue"
 
-        # Build variables
-        post_input: Dict[str, Any] = {
-            "channelId": params.channel_id,
-            "text": params.text,
-            "mode": mode,
-            "schedulingType": "automatic",
-        }
-
-        if params.scheduled_at:
-            post_input["dueAt"] = params.scheduled_at
-
-        # Buffer GraphQL AssetInput schema (updated 2026-05-26):
-        # assets is a LIST of AssetInput objects, each with ONE of:
-        #   { "image": { "url": "...", "thumbnailUrl": "..." } }
-        #   { "video": { "url": "...", "thumbnailUrl": "..." } }
-        # Old plural format (assets["images"]/assets["videos"]) is DEAD.
-        assets_list: list = []
-        if params.image_urls:
-            for url in params.image_urls:
-                assets_list.append({"image": {"url": url}})
-        if params.video_urls:
-            thumbs = params.video_thumbnails or []
-            for i, url in enumerate(params.video_urls):
-                entry: Dict[str, Any] = {"url": url}
-                if i < len(thumbs) and thumbs[i]:
-                    entry["thumbnailUrl"] = thumbs[i]
-                assets_list.append({"video": entry})
-        if assets_list:
-            post_input["assets"] = assets_list
-
-        # LinkedIn-specific metadata
-        linkedin_meta = {}
-        if params.linkedin_title:
-            linkedin_meta["title"] = params.linkedin_title
-        if params.linkedin_description:
-            linkedin_meta["description"] = params.linkedin_description
-        if params.linkedin_thumbnail_url:
-            linkedin_meta["thumbnailUrl"] = params.linkedin_thumbnail_url
-
-        # Twitter thread metadata. When thread_replies is supplied, schedule
-        # this post as a Twitter thread with each entry becoming a reply tweet.
-        # Required path for any Twitter CTA post per pre_schedule_gate.check_link_placement.
-        twitter_meta = {}
-        if params.thread_replies:
-            # ThreadedPostInput requires assets (NON_NULL) — pass empty list when no media
-            twitter_meta["thread"] = [{"text": t, "assets": []} for t in params.thread_replies]
-
-        metadata_obj = {}
-        if linkedin_meta:
-            metadata_obj["linkedin"] = linkedin_meta
-        if twitter_meta:
-            metadata_obj["twitter"] = twitter_meta
-        if metadata_obj:
-            post_input["metadata"] = metadata_obj
+        # Build the mutation input (assets + LinkedIn/Twitter metadata) via the
+        # shared builder so create/batch/update stay in lock-step.
+        post_input = _build_post_input(
+            channel_id=params.channel_id,
+            text=params.text,
+            mode=mode,
+            scheduled_at=params.scheduled_at,
+            image_urls=params.image_urls,
+            video_urls=params.video_urls,
+            video_thumbnails=params.video_thumbnails,
+            linkedin_title=params.linkedin_title,
+            linkedin_description=params.linkedin_description,
+            linkedin_thumbnail_url=params.linkedin_thumbnail_url,
+            thread_replies=params.thread_replies,
+        )
 
         mutation = """
         mutation CreatePost($input: CreatePostInput!) {
@@ -1249,29 +1284,19 @@ async def buffer_batch_create_posts(params: BatchCreatePostInput) -> str:
             else:
                 batch_mode = "addToQueue"
 
-            post_input: Dict[str, Any] = {
-                "channelId": params.channel_id,
-                "text": text,
-                "mode": batch_mode,
-                "schedulingType": "automatic",
-            }
-
-            if scheduled_at:
-                post_input["dueAt"] = scheduled_at
-
-            if image_urls:
-                post_input["assets"] = [{"image": {"url": url}} for url in image_urls]
-
-            # LinkedIn-specific metadata for batch posts
-            li_meta = {}
-            if post_data.get("linkedin_title"):
-                li_meta["title"] = post_data["linkedin_title"]
-            if post_data.get("linkedin_description"):
-                li_meta["description"] = post_data["linkedin_description"]
-            if post_data.get("linkedin_thumbnail_url"):
-                li_meta["thumbnailUrl"] = post_data["linkedin_thumbnail_url"]
-            if li_meta:
-                post_input["metadata"] = {"linkedin": li_meta}
+            post_input = _build_post_input(
+                channel_id=params.channel_id,
+                text=text,
+                mode=batch_mode,
+                scheduled_at=scheduled_at,
+                image_urls=image_urls,
+                video_urls=post_data.get("video_urls"),
+                video_thumbnails=post_data.get("video_thumbnails"),
+                linkedin_title=post_data.get("linkedin_title"),
+                linkedin_description=post_data.get("linkedin_description"),
+                linkedin_thumbnail_url=post_data.get("linkedin_thumbnail_url"),
+                thread_replies=post_data.get("thread_replies"),
+            )
 
             result = await _graphql_request(mutation, {"input": post_input})
 
@@ -1413,6 +1438,46 @@ class UpdatePostInput(BaseModel):
         default=None,
         description="New image URLs to attach (replaces any previous images).",
     )
+    video_urls: Optional[List[str]] = Field(
+        default=None,
+        description="New mp4 URLs to attach (replaces any previous media).",
+    )
+    video_thumbnails: Optional[List[str]] = Field(
+        default=None,
+        description="Optional poster-frame URLs, same length as video_urls.",
+    )
+    linkedin_title: Optional[str] = Field(
+        default=None, description="LinkedIn article title for the replacement post."
+    )
+    linkedin_description: Optional[str] = Field(
+        default=None, description="LinkedIn article description for the replacement post."
+    )
+    linkedin_thumbnail_url: Optional[str] = Field(
+        default=None, description="LinkedIn link-preview thumbnail for the replacement post."
+    )
+    thread_replies: Optional[List[str]] = Field(
+        default=None,
+        description="Twitter thread reply bodies for the replacement post.",
+    )
+    expected_scheduled_at: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional ISO 8601 UTC timestamp the post being replaced is "
+            "scheduled at. When provided, the tool re-lists posts on "
+            "channel_id and resolves the canonical (delete-able) ID via "
+            "dueAt match instead of trusting post_id blindly — the same "
+            "guard buffer_delete_post uses against Buffer's ID-rotation bug. "
+            "Strongly recommended: update is a delete+recreate, so a stale "
+            "post_id means the delete no-ops and you end up with a duplicate."
+        ),
+    )
+    verify_text_prefix: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional first ~80 chars of the existing post's text, used with "
+            "expected_scheduled_at to disambiguate posts sharing a dueAt."
+        ),
+    )
 
     @field_validator("channel_id")
     @classmethod
@@ -1454,6 +1519,33 @@ async def buffer_update_post(params: UpdatePostInput) -> str:
         - Use when: "Reschedule post X to 3pm instead of 2pm"
     """
     try:
+        # Step 0: Resolve the canonical (delete-able) ID before destroying
+        # anything. buffer_update_post is a delete+recreate; if post_id is
+        # stale (Buffer's ID-rotation bug) the delete silently no-ops and the
+        # recreate leaves a DUPLICATE. Re-list by schedule to get the real ID,
+        # mirroring buffer_delete_post's guard.
+        target_id = params.post_id
+        verify_note = ""
+        if params.expected_scheduled_at:
+            verified = await _find_post_by_schedule(
+                channel_id=params.channel_id,
+                scheduled_at_iso=params.expected_scheduled_at,
+                text_prefix=params.verify_text_prefix,
+            )
+            if verified is None:
+                return (
+                    f"No scheduled post found at `{params.expected_scheduled_at}` "
+                    f"on channel `{params.channel_id}`. Aborting update so an "
+                    f"orphan duplicate is not created."
+                )
+            verified_id = _canonical_post_id(verified)
+            if verified_id and verified_id != target_id:
+                verify_note = (
+                    f"\n(verify-by-schedule: provided `{params.post_id}`, "
+                    f"deleted canonical `{verified_id}`)"
+                )
+            target_id = verified_id or target_id
+
         # Step 1: Delete the old post
         delete_mutation = """
         mutation DeletePost($input: DeletePostInput!) {
@@ -1463,7 +1555,7 @@ async def buffer_update_post(params: UpdatePostInput) -> str:
             }
         }
         """
-        del_result = await _graphql_request(delete_mutation, {"input": {"id": params.post_id}})
+        del_result = await _graphql_request(delete_mutation, {"input": {"id": target_id}})
 
         err = _check_graphql_errors(del_result)
         if err:
@@ -1473,18 +1565,23 @@ async def buffer_update_post(params: UpdatePostInput) -> str:
         if del_payload.get("__typename") == "VoidMutationError":
             return f"Error deleting old post: {del_payload.get('message', 'Unknown error')}"
 
-        # Step 2: Create the replacement
+        # Step 2: Create the replacement. Uses the shared builder so media and
+        # metadata (videos, Twitter threads, LinkedIn fields) survive an edit —
+        # the old inline builder dropped everything but images.
         mode = "customScheduled" if params.scheduled_at else "addToQueue"
-        post_input: Dict[str, Any] = {
-            "channelId": params.channel_id,
-            "text": params.text,
-            "mode": mode,
-            "schedulingType": "automatic",
-        }
-        if params.scheduled_at:
-            post_input["dueAt"] = params.scheduled_at
-        if params.image_urls:
-            post_input["assets"] = [{"image": {"url": url}} for url in params.image_urls]
+        post_input = _build_post_input(
+            channel_id=params.channel_id,
+            text=params.text,
+            mode=mode,
+            scheduled_at=params.scheduled_at,
+            image_urls=params.image_urls,
+            video_urls=params.video_urls,
+            video_thumbnails=params.video_thumbnails,
+            linkedin_title=params.linkedin_title,
+            linkedin_description=params.linkedin_description,
+            linkedin_thumbnail_url=params.linkedin_thumbnail_url,
+            thread_replies=params.thread_replies,
+        )
 
         create_mutation = """
         mutation CreatePost($input: CreatePostInput!) {
@@ -1503,12 +1600,12 @@ async def buffer_update_post(params: UpdatePostInput) -> str:
 
         err = _check_graphql_errors(create_result)
         if err:
-            return f"Old post `{params.post_id}` was deleted, but new post failed: {err}"
+            return f"Old post `{target_id}` was deleted, but new post failed: {err}"
 
         extracted = _extract_post_result(create_result, "createPost")
         if not extracted["success"]:
             return (
-                f"Old post `{params.post_id}` was deleted, but new post failed: "
+                f"Old post `{target_id}` was deleted, but new post failed: "
                 f"{extracted.get('error', 'Unknown error')}"
             )
 
@@ -1516,7 +1613,7 @@ async def buffer_update_post(params: UpdatePostInput) -> str:
         lines = [
             "# Post Updated",
             "",
-            f"- **Old post deleted**: `{params.post_id}`",
+            f"- **Old post deleted**: `{target_id}`",
             f"- **New post ID**: `{post.get('id', 'N/A')}`",
             f"- **Status**: {post.get('status', 'N/A')}",
             f"- **Scheduled**: {post.get('dueAt', 'In queue')}",
@@ -1524,6 +1621,8 @@ async def buffer_update_post(params: UpdatePostInput) -> str:
         ]
         text_preview = params.text[:100] + "..." if len(params.text) > 100 else params.text
         lines.append(f"- **Text**: {text_preview}")
+        if verify_note:
+            lines.append(verify_note.strip())
         return "\n".join(lines)
 
     except Exception as e:
@@ -2097,7 +2196,7 @@ async def buffer_get_engagement(params: GetEngagementInput) -> str:
             "engagement": None,
             "engagement_source": None,
             "engagement_note": None,
-            "fetched_at": datetime.utcnow().isoformat() + "Z",
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
         }
 
         if channel_service in ("twitter", "x") and platform_id:

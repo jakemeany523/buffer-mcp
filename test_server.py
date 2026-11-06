@@ -33,8 +33,10 @@ if THIS_DIR not in sys.path:
 
 import server  # noqa: E402
 from server import (  # noqa: E402
+    _build_post_input,
     _canonical_post_id,
     _due_ats_match,
+    _extract_platform_id,
     _find_post_by_schedule,
     _is_pagination_schema_error,
     _list_posts_paginated,
@@ -43,10 +45,12 @@ from server import (  # noqa: E402
     buffer_delete_post,
     buffer_list_posts,
     buffer_find_post_by_schedule,
+    buffer_update_post,
     CreatePostInput,
     DeletePostInput,
     FindPostByScheduleInput,
     ListPostsInput,
+    UpdatePostInput,
 )
 
 
@@ -376,6 +380,161 @@ class TestFindPostByScheduleTool(unittest.TestCase):
             )))
 
         self.assertIn("No scheduled post found", got)
+
+
+# ---- Platform-ID extraction (engagement loop) ---------------------------
+
+
+class TestExtractPlatformId(unittest.TestCase):
+
+    def test_twitter_status_url(self):
+        self.assertEqual(
+            _extract_platform_id(
+                "https://x.com/1847432077639114752/status/2048847401138483469",
+                "twitter",
+            ),
+            "2048847401138483469",
+        )
+
+    def test_twitter_service_alias_x(self):
+        self.assertEqual(
+            _extract_platform_id("https://x.com/jake/status/123", "x"), "123"
+        )
+
+    def test_linkedin_urn_variants(self):
+        base = "https://www.linkedin.com/feed/update/"
+        self.assertEqual(
+            _extract_platform_id(base + "urn:li:share:7453592437333078016", "linkedin"),
+            "7453592437333078016",
+        )
+        self.assertEqual(
+            _extract_platform_id(base + "urn:li:activity:7453592437333078017", "linkedin"),
+            "7453592437333078017",
+        )
+
+    def test_returns_none_on_bad_input(self):
+        self.assertIsNone(_extract_platform_id(None, "twitter"))
+        self.assertIsNone(_extract_platform_id("https://x.com/jake", "twitter"))
+        self.assertIsNone(_extract_platform_id("https://example.com/x", "facebook"))
+
+
+# ---- Shared post-input builder ------------------------------------------
+
+
+class TestBuildPostInput(unittest.TestCase):
+
+    def test_minimal_post(self):
+        got = _build_post_input("ch1", "hello", "addToQueue")
+        self.assertEqual(got["channelId"], "ch1")
+        self.assertEqual(got["mode"], "addToQueue")
+        self.assertNotIn("assets", got)
+        self.assertNotIn("metadata", got)
+        self.assertNotIn("dueAt", got)
+
+    def test_images_and_videos_use_singular_asset_shape(self):
+        got = _build_post_input(
+            "ch1", "t", "customScheduled",
+            scheduled_at="2026-05-01T10:00:00Z",
+            image_urls=["https://img/a.png"],
+            video_urls=["https://v/b.mp4"],
+            video_thumbnails=["https://v/b.jpg"],
+        )
+        self.assertEqual(got["dueAt"], "2026-05-01T10:00:00Z")
+        self.assertEqual(
+            got["assets"],
+            [
+                {"image": {"url": "https://img/a.png"}},
+                {"video": {"url": "https://v/b.mp4", "thumbnailUrl": "https://v/b.jpg"}},
+            ],
+        )
+
+    def test_linkedin_and_twitter_metadata(self):
+        got = _build_post_input(
+            "ch1", "t", "addToQueue",
+            linkedin_title="Title",
+            linkedin_description="Desc",
+            thread_replies=["reply one", "reply two"],
+        )
+        self.assertEqual(got["metadata"]["linkedin"], {"title": "Title", "description": "Desc"})
+        self.assertEqual(
+            got["metadata"]["twitter"]["thread"],
+            [{"text": "reply one", "assets": []}, {"text": "reply two", "assets": []}],
+        )
+
+
+# ---- buffer_update_post canonical-ID safety -----------------------------
+
+
+class TestUpdatePostVerify(unittest.TestCase):
+
+    def test_update_deletes_canonical_id_not_stale_id(self):
+        """The destructive delete must target the canonical (re-listed) ID,
+        not the caller's possibly-rotated post_id."""
+        due_at = "2026-05-15T19:30:00Z"
+        fake = FakeGraphQL([
+            # _find_post_by_schedule → canonical lookup
+            {"any": True, "response": _list_response(
+                [_post_node("canonical-id-Y", due_at, text="old text")]
+            )},
+            # deletePost (must hit canonical-id-Y)
+            {"any": True, "response": _delete_success("canonical-id-Y")},
+            # createPost replacement
+            {"any": True, "response": _create_success("new-id-Z", due_at, text="new text")},
+        ])
+        with patch.object(server, "_graphql_request", new=fake):
+            got = run_async(buffer_update_post(UpdatePostInput(
+                post_id="stale-id-X",
+                channel_id="twitter",
+                text="new text",
+                scheduled_at=due_at,
+                expected_scheduled_at=due_at,
+                verify_text_prefix="old text",
+            )))
+
+        self.assertIn("new-id-Z", got)
+        self.assertIn("verify-by-schedule", got)
+        delete_input = fake.calls[1]["variables"]["input"]
+        self.assertEqual(delete_input["id"], "canonical-id-Y")
+
+    def test_update_aborts_when_no_match_found(self):
+        """If verify is requested but no post matches, abort BEFORE deleting
+        so we never strand a duplicate."""
+        fake = FakeGraphQL([
+            {"any": True, "response": _list_response([])},
+        ])
+        with patch.object(server, "_graphql_request", new=fake):
+            got = run_async(buffer_update_post(UpdatePostInput(
+                post_id="stale-id-X",
+                channel_id="twitter",
+                text="new text",
+                scheduled_at="2026-05-15T19:30:00Z",
+                expected_scheduled_at="2026-05-15T19:30:00Z",
+            )))
+
+        self.assertIn("No scheduled post found", got)
+        self.assertEqual(len(fake.calls), 1, "must not issue delete/create after abort")
+
+    def test_update_preserves_video_and_thread_metadata(self):
+        """Regression: update used to silently drop everything but images."""
+        fake = FakeGraphQL([
+            {"any": True, "response": _delete_success("plain-id")},
+            {"any": True, "response": _create_success("new-id", "", text="t")},
+        ])
+        with patch.object(server, "_graphql_request", new=fake):
+            run_async(buffer_update_post(UpdatePostInput(
+                post_id="plain-id",
+                channel_id="twitter",
+                text="t",
+                video_urls=["https://v/clip.mp4"],
+                thread_replies=["a reply"],
+            )))
+
+        create_input = fake.calls[1]["variables"]["input"]
+        self.assertEqual(create_input["assets"], [{"video": {"url": "https://v/clip.mp4"}}])
+        self.assertEqual(
+            create_input["metadata"]["twitter"]["thread"],
+            [{"text": "a reply", "assets": []}],
+        )
 
 
 if __name__ == "__main__":
